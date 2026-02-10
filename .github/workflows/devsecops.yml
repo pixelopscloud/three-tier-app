@@ -1,0 +1,27 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  security-scan:
+    runs-on: self-hosted
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Trivy filesystem scan
+        run: |
+          docker run --rm -v $(pwd):/app aquasec/trivy:latest fs /app
+      
+      - name: Build Docker images
+        run: |
+          docker compose build
+      
+      - name: Trivy image scan
+        run: |
+          docker images --format "{{.Repository}}:{{.Tag}}" | grep -v "<none>" | xargs -I {} docker run --rm aquasec/trivy:latest image {}
