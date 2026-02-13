@@ -1,19 +1,106 @@
-name: DevSecOps Pipeline
+name: DevSecOps Complete Pipeline
 
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+  REGISTRY: docker.io
 
 jobs:
-  build:
+  
+  sonarqube-scan:
+    name: SonarQube Code Quality
     runs-on: self-hosted
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
-      - name: Build Docker images
-        run: docker compose build
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
       
-      - name: Show images
-        run: docker images
+      - name: SonarQube Quality Gate
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  build-and-scan:
+    name: Build & Security Scan
+    runs-on: self-hosted
+    needs: sonarqube-scan
+    
+    strategy:
+      matrix:
+        service: [frontend, backend]
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      - name: Build Docker Image
+        run: |
+          cd ${{ matrix.service }}
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:${{ github.sha }} .
+          docker tag ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:${{ github.sha }} \
+                     ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:latest
+      
+      - name: Trivy Security Scan
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity HIGH,CRITICAL \
+            --format table \
+            --no-progress \
+            ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:${{ github.sha }}
+      
+      - name: Push Docker Images
+        run: |
+          docker push ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:${{ github.sha }}
+          docker push ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:latest
+      
+      - name: Image Cleanup
+        run: |
+          docker rmi ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:${{ github.sha }} || true
+          docker rmi ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:latest || true
+
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: self-hosted
+    needs: build-and-scan
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Update Deployment Status
+        run: |
+          echo "Deployment triggered for commit: ${{ github.sha }}"
+          echo "Images pushed:"
+          echo "- ${{ secrets.DOCKER_USERNAME }}/three-tier-frontend:${{ github.sha }}"
+          echo "- ${{ secrets.DOCKER_USERNAME }}/three-tier-backend:${{ github.sha }}"
+      
+      - name: Notify ArgoCD
+        run: |
+          echo "ArgoCD will auto-sync the application"
+          echo "Monitor at: https://${{ secrets.ARGOCD_SERVER }}/applications"
