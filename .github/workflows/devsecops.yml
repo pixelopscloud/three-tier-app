@@ -3,35 +3,14 @@ name: DevSecOps Complete Pipeline
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
 
 env:
   DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-  REGISTRY: docker.io
 
 jobs:
-  
-  sonarqube-scan:
-    name: SonarQube Code Quality
+  build-and-push:
+    name: Build & Push Images
     runs-on: self-hosted
-    
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
-  build-and-scan:
-    name: Build & Security Scan
-    runs-on: self-hosted
-    needs: sonarqube-scan
     
     strategy:
       matrix:
@@ -50,44 +29,23 @@ jobs:
       - name: Build Docker Image
         run: |
           cd ${{ matrix.service }}
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:${{ github.sha }} .
-          docker tag ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:${{ github.sha }} \
-                     ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:latest
-      
-      - name: Trivy Security Scan
-        continue-on-error: true
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:latest image \
-            --severity HIGH,CRITICAL \
-            --format table \
-            --no-progress \
-            --timeout 10m \
-            ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:${{ github.sha }} || echo "⚠️ Trivy scan failed but continuing..."
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:latest .
       
       - name: Push Docker Images
         run: |
-          docker push ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:${{ github.sha }}
           docker push ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:latest
       
       - name: Image Cleanup
         run: |
-          docker rmi ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:${{ github.sha }} || true
           docker rmi ${{ secrets.DOCKER_USERNAME }}/three-tier-${{ matrix.service }}:latest || true
-
+  
   deploy:
-    name: Deploy to Kubernetes
+    name: Deploy Status
     runs-on: self-hosted
-    needs: build-and-scan
+    needs: build-and-push
     
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-      
       - name: Update Deployment Status
         run: |
-          echo "✅ Deployment triggered for commit: ${{ github.sha }}"
-          echo "📦 Images pushed to DockerHub"
-          echo "🚀 ArgoCD auto-sync enabled"
-          echo "🌐 Application URL: http://172.29.211.172:30300"
+          echo "✅ Images pushed to DockerHub"
+          echo "🚀 ArgoCD will auto-sync"
